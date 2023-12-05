@@ -127,6 +127,7 @@ print(paste0('Random Forest Accuracy:',rf_accuracy))
 print(paste0('Generalized Linear Model Accuracy:',glm_accuracy))
 print(paste0('Ensemble Accuracy:',accuracy))
 
+# monte carlo simulation to see how close predictions are to guessing
 guessing = function (g){
   random_guess = rbinom(nrow(val_set), 1, 0.5)
   random_guess_accuracy = mean(final_prediction == as.factor(random_guess))
