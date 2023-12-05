@@ -1,0 +1,280 @@
+---
+title: "Choose Your Own Project"
+output:
+  pdf_document: default
+  html_document: default
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+Cardiovascular disease is the leading cause of morbidity and mortality world wide. Of these diseases, myocardial infarctions, better known as heart attacks, is perhaps the most well known. An essential component in reducing the incident of this disease is the accurate identification of a person's risk factor and likelihood for an event. 
+
+To better understand the contributing factors in causing heart attacks, in 1948, a large generational study known as the Framingham Heart Study was carried out where a plethora of metrics were measured on the participating individuals. The data for this study was made available and as of now some over 3000 scientific articles have been based on its data. 
+
+This project aims to use the Framingham Heart Study data to predict the likelihood of a given individual to get a heart attack, splitting the groups into likely and unlikely (here as factors 0 for unlikely and 1 for likely). The goal in which is the make individuals aware that they may be at risk for a heart attack and to recommend initial lifestyle changes to try and mitigate the risks.  
+
+
+# Method/Analysis
+
+First, the data is prepared:
+
+```{r echo=T, results = 'hide', message=FALSE, warning=FALSE}
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(riskCommunicator)) install.packages(
+  "riskCommunicator", repos = "http://cran.us.r-project.org")
+if(!require(party)) install.packages("party", repos = "http://cran.us.r-project.org")
+if(!require(kernlab)) install.packages("kernlab", repos = "http://cran.us.r-project.org")
+
+library(riskCommunicator)
+library(tidyverse)
+library(caret)
+library(party)
+library(kernlab)
+
+data("framingham")
+set.seed(10)
+# we aim to identify factors which allow prediction of myocardial infarctions
+
+# data preparation:
+select_columns = c('SEX', 
+                   'TOTCHOL',
+                   'AGE',
+                   'SYSBP',
+                   'DIABP',
+                   'BMI',
+                   'BPMEDS',
+                   'HEARTRTE',
+                   'GLUCOSE',
+                   'MI_FCHD',
+                   'PREVCHD',
+                   'PREVSTRK',
+                   'PREVMI'
+                   )
+
+dataset_cleaned = framingham[select_columns]
+
+dataset_cleaned = dataset_cleaned %>% mutate(MI_FCHD_fact = as.factor(MI_FCHD))
+# remove NA data
+dataset_cleaned = na.omit(dataset_cleaned)
+
+```
+
+In this case the data is filtered for only a small subset of factors. These factors are data that typically can be examined with a simple blood test or medical history check, this adds relevance in the findings as the model is in theory usable in a walk in clinical setting.
+
+To examine the initial data arrangement:
+```{r}
+head(dataset_cleaned, 10)
+summary(dataset_cleaned)
+```
+There is a mix of discreet factors and continuous variables. Column MI_FCHD indicates whether the person had an infarction event. This column is Of interest as only 1480 of roughly 9500 entries have had an infarction event. 
+
+To confirm this the actual proportion can be checked:
+```{r}
+# proportion with MI
+mean(as.logical(dataset_cleaned$MI_FCHD))
+```
+Only 15% of the cohort suffered from MI. This adds complexity to the modelling, as simply guessing that a person is not at risk would result in an accuracy of roughly 85% leaving little room for improvement from additional variables. Therefore, the next step is to balance the training data.
+
+```{r}
+# only 15 pct have MI, that means 85% accuracy is achievable by saying everyone is healthy.
+# to even the proportions:
+MI = dataset_cleaned[dataset_cleaned$MI_FCHD_fact == 1,]
+normal = dataset_cleaned[dataset_cleaned$MI_FCHD_fact == 0,]
+# sample normals so that it matches MI length
+normal_sample = normal[sample(nrow(normal), nrow(MI)), ]
+# join the df back together
+dataset_cleaned = rbind(MI,normal_sample)
+
+print(mean(as.logical(dataset_cleaned$MI_FCHD)))
+```
+Now that the base accuracy is 50% models will now be forced to improve this based on the variables supplied. From this data training and validation data is split.
+
+```{r}
+# split train and test
+test_index = createDataPartition(
+  y = dataset_cleaned$MI_FCHD_fact, times = 1, p = 0.5, list = FALSE)
+train_set = dataset_cleaned[-test_index,]
+val_set = dataset_cleaned[test_index,]
+```
+
+The general strategy from here is to examine variable ML models to identify what the expected performance is and which model has the highest performance.
+
+Too see which factor likely contributes the most to the prediction functions, an linear model is fitted across all factors.
+
+```{r}
+# test factor dependence using linear modelling:
+
+linear_model = lm(MI_FCHD ~. -MI_FCHD_fact, data = train_set)
+summary(linear_model)
+```
+There looks to be very strong dependence on sex, total_cholesterol, glucose and previous heart disease. Interestingly previous infarctions while significant at the 95% confidence, does not seem to be necessarily a very strong predictor for future infarctions. 
+
+To test the predictive power of a linear model:
+
+```{r}
+lm_prediction = predict(linear_model, val_set)
+lm_prediction = as.numeric(lm_prediction > 0.5)
+lm_accuracy = mean(lm_prediction == val_set$MI_FCHD_fact)
+
+print(paste0('LM Accuracy:',lm_accuracy))
+```
+About 70.6% predictive accuracy with a multi-factor linear model. 
+
+Next a set of additional discriminators are tested. Starting with a decision tree
+
+```{r}
+# train a decision tree:
+tc = trainControl(method = "cv", number=10)
+rt_fit = train(
+  MI_FCHD_fact ~. -MI_FCHD, 
+  data = train_set, 
+  method = "ctree", 
+  trControl=tc, 
+  tuneLength=10)
+```
+
+This is then checked with plots of the fitting parameters
+
+```{r echo=FALSE}
+plot(rt_fit)
+print(rt_fit)
+ctree_prediction = predict(rt_fit, val_set)
+ctree_accuracy = mean(ctree_prediction == val_set$MI_FCHD_fact)
+print(paste0('Descision Tree Accuracy:',ctree_accuracy))
+```
+A crossvalidated accuracy of 0.68 was achieved with the mincriterion parameter of 0.7722. This criterion is used for the final fitted model. Cross validation is important as it reduces the risk of overfitting on the training data by scrambling the dataset on each resample. 
+
+An additional 4 other classification models is then tested to identify which has the best performance.
+
+KNN:
+```{r echo = FALSE}
+# train a k nearest neighbour
+tc = trainControl(method = "cv", number=10)
+knn_fit = train(
+  MI_FCHD_fact ~. -MI_FCHD, 
+  data = train_set, 
+  method = "knn", 
+  trControl=tc, 
+  tuneLength=10)
+
+knn_prediction = predict(knn_fit, val_set)
+knn_fit
+plot(knn_fit)
+knn_accuracy = mean(knn_prediction == val_set$MI_FCHD_fact)
+print(paste0('KNN Accuracy:',knn_accuracy))
+```
+Performance of the KNN model is quite poor in comparison with linear models. Peak accuracy occurs at a large amount of neighbors, but even at that point the predictive accuracy is over 10% less than the linear model. 
+
+
+Random Forest:
+
+```{r echo = FALSE}
+# train a random forest
+tc = trainControl(method = "cv", number=5)
+rf_fit = train(MI_FCHD_fact ~. -MI_FCHD, data = train_set, method = "rf", trControl=tc, tuneLength=10)
+
+rf_prediction = predict(rf_fit, val_set)
+rf_fit
+plot(rf_fit)
+rf_accuracy = mean(rf_prediction == val_set$MI_FCHD_fact)
+print(paste0('Random Forest Accuracy:',rf_accuracy))
+```
+The results for random forest seems interesting. For the individual trees, there appears to be favoritism towards the extremes of complexity, with either a very small tree (4 predictors) or very large tree (12 predictors) being the most accurate. 
+
+Generalized Linear Model:
+```{r echo = FALSE}
+# train a generalised linear model
+tc = trainControl(method = "cv", number=10)
+glm_fit = train(
+  MI_FCHD_fact ~. -MI_FCHD, 
+  data = train_set, 
+  method = "glm", 
+  trControl=tc, 
+  tuneLength=10)
+summary(glm_fit)
+glm_prediction = predict(glm_fit, val_set)
+glm_accuracy = mean(glm_prediction == val_set$MI_FCHD_fact)
+print(paste0('Generalized Linear Model Accuracy:',glm_accuracy))
+```
+GLM shows performance similar to standard linear modelling. 
+
+The overall accuracy for all models sits somewhere between 60 and 70%. A method to possibly further improve the results is to use an ensemble where multiple models for training data is used and the final value is chosen on consensus. To implement a simple version of this, a voting system is introduced with majority votes resulting in the selected outcome. 
+
+As an ensemble:
+```{r}
+# use the model predictions to create an ensemble
+# will have a voting system where majority rules
+ct_vote = as.numeric(ctree_prediction)-1
+knn_vote = as.numeric(knn_prediction)-1
+rf_vote = as.numeric(rf_prediction)-1
+glm_vote = as.numeric(glm_prediction)-1
+lm_vote = as.numeric(lm_prediction)-1 
+
+vote_tally = ct_vote+knn_vote+rf_vote+glm_vote+lm_vote
+final_prediction = as.factor(as.numeric(vote_tally >= 3))
+accuracy = mean(final_prediction == val_set$MI_FCHD_fact)
+print(accuracy)
+```
+Interestingly the ensemble prediction accuracy is lower than that for the GLM and LM. suggesting the classifier models may be dragging down the accuracy.  
+
+# Results and discussion
+
+The final results obtained from this exercise is as follows:
+```{r echo=FALSE}
+print(paste0('LM Accuracy:',lm_accuracy))
+print(paste0('Decision Tree Accuracy:',ctree_accuracy))
+print(paste0('KNN Accuracy:',knn_accuracy))
+print(paste0('Random Forest Accuracy:',rf_accuracy))
+print(paste0('Generalized Linear Model Accuracy:',glm_accuracy))
+print(paste0('Ensemble Accuracy:',accuracy))
+```
+From these results we find that the two linear models (LM and GLM) performs best at this task, while KNN is worst. However, interestingly, predictive accuracy for all the models were comparatively low. If such a system is used for advising people of their risk factor for MI occurring, then ideally the performance would be higher. 
+
+In terms of the low predictive accuracy, it's likely that the current accuracy is close to the maximum accuracy achievable with the set of predictors selected. This is noted as most models predict similar accuracy levels and an ensemble of the models did not increase predictive power. In terms of the underlying mechanism of infarctions, there is potentially extensive random factors and additional factors not measured in the overall study from which the data is derived.
+
+To check if the predicted accuracies is beyond what is likely by chance, a monte carlo simulation can be carried out to see the expected results from randomly guessing results:
+```{r}
+
+guessing = function (g){
+  random_guess = rbinom(nrow(val_set), 1, 0.5)
+  random_guess_accuracy = mean(final_prediction == as.factor(random_guess))
+}
+
+monte_carlo = sapply(1:10000, guessing)
+ggplot() + geom_histogram(aes(x = monte_carlo ), bins=50) + 
+  geom_vline(aes(xintercept = accuracy, ), color='red') +
+  annotate("text", x=accuracy+0.002, y=500, label="Ensemble Accuracy", angle=90) +
+  annotate("text", x=0.5, y=500, label="guessing", color = 'white')
+
+```
+
+we note in comparison to the monte carlo simulated guesses, the models perform considerable better and so offers some predictive ability over random guessing.
+
+# Conclusion
+
+This study aimed to investigate the ability to develop a method for predicting a person's susceptibility to myocardial infarctions through the use of various machine learning models. We noted that the 5 methods tested all produced results sitting in the range of 60 to 70 percent accuracy. Testing against random generated numbers howed that while low, these predicted values were higher than what is expected from random sampling, proving that there is predictive power present within the model.
+
+The ability to accurately predict onset of infarctions is essential to reducing the burden of disease from heart disease and so pursuits into this kind of predictive modelling is of significant impact if it is able to do so with high degrees of accuracy. 
+
+Future work in this field will focus on discovering additional predictors to better improve the accuracy of the predictions. In addition to this, instead of predicting on a binary scale of 'at risk' and 'not at risk' a sliding scale should be implemented where the predicted value is a range, stretching between these two extremes. 
+
+Overall, the results of this project is a start in modelling for prediction of infarctions. 
+
+# References
+
+Wickham, H., Averick, M., Bryan, J., Chang, W., McGowan, L. D. A., François, R., ... & Yutani, H. (2019). Welcome to the Tidyverse. Journal of open source software, 4(43), 1686.
+
+Grembi, J. A., & Rogawski McQuade, E. T. (2022). Introducing riskCommunicator: An R package to obtain interpretable effect estimates for public health. PLoS One, 17(7), e0265368.
+
+Kuhn, M. (2015). Caret: classification and regression training. Astrophysics Source Code Library, ascl-1505.
+
+Hothorn, T., Hornik, K., Strobl, C., Zeileis, A., & Hothorn, M. T. (2015). Package ‘party’. Package Reference Manual for Party Version 0.9-998, 16, 37.
+
+Karatzoglou, A., Smola, A., Hornik, K., & Zeileis, A. (2004). kernlab-an S4 package for kernel methods in R. Journal of statistical software, 11, 1-20.
+
